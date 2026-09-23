@@ -3261,7 +3261,8 @@
             this.syncAiFilterUi();
             if (this.bubbleBtn && this.bubbleLabel) {
                 const hostname = String(window.location.hostname || "").trim();
-                this.bubbleLabel.textContent = hostname ? `Discourse2MD · ${hostname}` : `Discourse2MD` ;
+                //this.bubbleLabel.textContent = hostname ? `Discourse2MD · ${hostname}` : `Discourse2MD` ;
+                this.bubbleLabel.textContent = `Discourse2MD` ;
                 this.bubbleBtn.setAttribute("aria-label", this.bubbleLabel.textContent);
             }
 
@@ -3475,7 +3476,8 @@
 
         const topic = {
             topicId: String(topicId || ""),
-            title: mainData?.title ? String(mainData.title) : document.title,
+            // 提取帖子标题并清除首尾可能存在的空白字符，保证标题纯净
+            title: String(mainData?.title ? mainData.title : (document.title || "")).trim(),
             category: domCategory,
             tags:
                 (Array.isArray(mainData?.tags) && mainData.tags.length
@@ -4618,9 +4620,14 @@
 
         const allTags = [...new Set([...(topic.tags || []), "linuxdo"])];
         const tagsYaml = allTags.map((t) => `  - "${escapeYaml(t)}"`).join("\n");
+        // 规整大标题文本，去除首尾空白字符并设置默认回退值
+        const resolvedTitle = String(topic?.title || "").trim() || "无标题";
 
+        // 构建 Markdown 的 Frontmatter 元数据
+        // 注意：原代码的模板字符串闭合反引号前存在缩进空格（"        `"），与 content 拼接后会导致正文大标题 "# " 前带有空格；
+        // 此处去除闭合反引号前的前导空格，并通过 .trimEnd() + "\n\n" 确保 Frontmatter 与正文之间始终为干净的双换行分隔
         const frontmatter = `---
-title: "${escapeYaml(topic.title || "")}"
+title: "${escapeYaml(resolvedTitle)}"
 topic_id: ${topic.topicId || 0}
 url: "${topic.url || ""}"
 author: "${escapeYaml(topic.opUsername || "")}"
@@ -4630,10 +4637,10 @@ ${tagsYaml}
 export_time: "${now.toISOString()}"
 floors: ${posts.length}
 ---
+`.trimEnd() + "\n\n";
 
-        `;
-
-        let content = `# ${topic.title || "无标题"}\n\n`;
+        // 生成文章大标题，紧接在 Frontmatter 双换行之后，避免出现任何前置缩进空格
+        let content = `# ${resolvedTitle}\n\n`;
         content += generateTopicInfoSection(topic, posts, filterSummary, now, exportTemplate, context);
 
         if (exportTemplate === "clean") {
@@ -4916,7 +4923,8 @@ floors: ${posts.length}
         if (!isCleanTemplate && settings.ai?.enabled && aiConfigMissing) {
             throw new Error("请先完整配置 AI 过滤的 API URL、API Key 和 Model ID");
         }
-
+        
+        //获取数据的地方
         const data = await fetchAllPostsDetailed(topicId);
         let selected = [];
         let filterSummary = "";
