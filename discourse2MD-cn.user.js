@@ -3449,6 +3449,149 @@
     }
 
     // -----------------------
+    // 日期处理与首楼时间提取
+    // -----------------------
+    /**
+     * 将日期（Date 对象、毫秒时间戳或日期字符串）格式化为 "YYYY-MM-DD HH:mm:ss" 本地时间字符串
+     * @param {Date|number|string} dateInput - 输入的日期对象、时间戳或 ISO 日期字符串
+     * @returns {string} 格式化后的时间字符串，无效时返回空字符串
+     */
+    function formatLocalDateTime(dateInput) {
+        if (!dateInput) return "";
+        const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
+        if (isNaN(date.getTime())) return "";
+        const pad = (n) => String(n).padStart(2, "0");
+        const year = date.getFullYear();
+        const month = pad(date.getMonth() + 1);
+        const day = pad(date.getDate());
+        const hours = pad(date.getHours());
+        const minutes = pad(date.getMinutes());
+        const seconds = pad(date.getSeconds());
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    }
+
+    /**
+     * 解析 title 或文本中的日期字符串（支持中文格式如 "2026 年 7月 27 日 14:10" 以及常见标准日期字符串）
+     * @param {string} text - 待解析的文本
+     * @returns {Date|null} 解析成功返回 Date 实例，失败返回 null
+     */
+    function parseDateFromTitleOrString(text) {
+        if (!text || typeof text !== "string") return null;
+        // 匹配中文日期格式，如 "2026 年 7月 27 日 14:10" 或 "2026 年 7月 27 日 14:10:35"
+        const cnMatch = text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+        if (cnMatch) {
+            const date = new Date(cnMatch[1], cnMatch[2] - 1, cnMatch[3], cnMatch[4], cnMatch[5], cnMatch[6] || 0);
+            if (!isNaN(date.getTime())) return date;
+        }
+        // 尝试标准 Date.parse
+        const parsed = Date.parse(text);
+        if (!isNaN(parsed)) return new Date(parsed);
+        return null;
+    }
+
+    /**
+     * 提取帖子首楼的发布时间（用于 Markdown frontmatter 的 create_date 属性）
+     * 提取策略：
+     * 1. 优先尝试从 DOM 中获取首楼发布日期元素（匹配 Discourse 结构：.post-info.post-date 内的 .relative-date[data-time]）
+     * 2. 若 DOM 节点不存在或无法解析（如虚拟滚动尚未挂载首楼），回退读取 Discourse API 响应中的 mainFirstPost?.created_at 或 mainData?.created_at
+     * 3. 最终统一转换为 "YYYY-MM-DD HH:mm:ss" 本地时间字符串
+     * @param {Object} mainFirstPost - API 返回的首楼帖子对象
+     * @param {Object} mainData - API 返回的主题详情数据
+     * @returns {string} 格式化后的时间字符串
+     */
+    function extractFirstPostPublishDate(mainFirstPost, mainData) {
+        let rawDate = null;
+
+        try {
+            // 优先匹配首楼容器，确保获取到的是首楼发布日期而非后续楼层
+            const dateEl =
+                document.querySelector("#post_1 .post-info.post-date .relative-date") ||
+                document.querySelector("#post_1 .post-info.post-date [data-time]") ||
+                document.querySelector("[data-post-number='1'] .post-info.post-date .relative-date") ||
+                document.querySelector(".topic-post:first-child .post-info.post-date .relative-date") ||
+                document.querySelector(".post-info.post-date .relative-date") ||
+                document.querySelector(".post-info.post-date [data-time]");
+
+            if (dateEl) {
+                // 读取 HTML 标签中的 data-time 毫秒时间戳（如: data-time="1785119984127"）
+                const dataTimeAttr = dateEl.getAttribute("data-time");
+                if (dataTimeAttr && !isNaN(Number(dataTimeAttr))) {
+                    rawDate = Number(dataTimeAttr);
+                } else {
+                    // 若无 data-time，则尝试解析 title 属性（如: title="2026 年 7月 27 日 10:39"）
+                    const titleAttr = dateEl.getAttribute("title");
+                    const parsedTitle = parseDateFromTitleOrString(titleAttr);
+                    if (parsedTitle) rawDate = parsedTitle;
+                }
+            }
+        } catch (e) {
+            // DOM 查询异常防御，忽略并继续尝试 API 回退
+        }
+
+        // 若 DOM 提取失败（例如虚拟滚动导致首楼未渲染在视口中），则使用 API 返回的创建时间
+        if (!rawDate) {
+            rawDate = mainFirstPost?.created_at || mainData?.created_at || null;
+        }
+
+        return formatLocalDateTime(rawDate);
+    }
+
+    /**
+     * 提取帖子首楼的最后编辑时间（用于 Markdown frontmatter 的 edit_date 属性）
+     * 提取策略：
+     * 1. 优先尝试从 DOM 中获取首楼编辑记录元素（匹配 Discourse 结构：.post-info.edits button[title*="编辑"]）
+     * 2. 若 DOM 未挂载，检查 API 数据中的 mainFirstPost：若 version > 1 或存在 last_version_at / updated_at，回退读取 API 时间戳
+     * 3. 若帖子未被编辑过，则返回空字符串 ""
+     * 4. 最终统一转换为 "YYYY-MM-DD HH:mm:ss" 本地时间字符串
+     * @param {Object} mainFirstPost - API 返回的首楼帖子对象
+     * @param {Object} mainData - API 返回的主题详情数据
+     * @returns {string} 格式化后的时间字符串，若未编辑过则返回空字符串
+     */
+    function extractFirstPostEditDate(mainFirstPost, mainData) {
+        let rawDate = null;
+
+        try {
+            // 匹配首楼的编辑历史元素（如: <div class="post-info edits"><button title="帖子最后编辑于 2026 年 7月 27 日 14:10">）
+            const editsEl =
+                document.querySelector("#post_1 .post-info.edits") ||
+                document.querySelector("[data-post-number='1'] .post-info.edits") ||
+                document.querySelector(".topic-post:first-child .post-info.edits") ||
+                document.querySelector(".post-info.edits");
+
+            if (editsEl) {
+                // 检查内部是否有携带 data-time 的子元素
+                const timeEl = editsEl.querySelector("[data-time]");
+                if (timeEl) {
+                    const dataTimeAttr = timeEl.getAttribute("data-time");
+                    if (dataTimeAttr && !isNaN(Number(dataTimeAttr))) {
+                        rawDate = Number(dataTimeAttr);
+                    }
+                }
+                // 若无 data-time，则从 button 或容器的 title 属性中解析（如: title="帖子最后编辑于 2026 年 7月 27 日 14:10"）
+                if (!rawDate) {
+                    const btn = editsEl.querySelector("button") || editsEl;
+                    const titleAttr = btn.getAttribute("title") || editsEl.getAttribute("title");
+                    const parsedTitle = parseDateFromTitleOrString(titleAttr);
+                    if (parsedTitle) rawDate = parsedTitle;
+                }
+            }
+        } catch (e) {
+            // DOM 查询异常防御，忽略并继续尝试 API 回退
+        }
+
+        // 若 DOM 未能解析到编辑时间（例如虚拟滚动），检查 API 中首帖是否处于已编辑状态（version > 1）
+        if (!rawDate && mainFirstPost) {
+            const isEdited = (mainFirstPost.version && mainFirstPost.version > 1) ||
+                (mainFirstPost.last_version_at && mainFirstPost.last_version_at !== mainFirstPost.created_at);
+            if (isEdited) {
+                rawDate = mainFirstPost.last_version_at || mainFirstPost.updated_at || null;
+            }
+        }
+
+        return formatLocalDateTime(rawDate);
+    }
+
+    // -----------------------
     // 拉取所有帖子
     // -----------------------
     async function fetchAllPostsDetailed(topicId) {
@@ -3474,6 +3617,10 @@
             .map((t) => t.textContent.trim())
             .filter(Boolean);
 
+        // 提取首楼发布时间与最后编辑时间
+        const createDate = extractFirstPostPublishDate(mainFirstPost, mainData);
+        const editDate = extractFirstPostEditDate(mainFirstPost, mainData);
+
         const topic = {
             topicId: String(topicId || ""),
             // 提取帖子标题并清除首尾可能存在的空白字符，保证标题纯净
@@ -3487,6 +3634,10 @@
                     : domTags) || [],
             url: window.location.href,
             opUsername: opUsername || "",
+            // 首楼发布时间，格式为 "YYYY-MM-DD HH:mm:ss"
+            createDate: createDate || "",
+            // 首楼最后编辑时间，格式为 "YYYY-MM-DD HH:mm:ss"（若未编辑则为空字符串）
+            editDate: editDate || "",
         };
 
         let allPosts = [];
@@ -4591,6 +4742,7 @@
         return String(str || "").replace(/"/g, '\\"').replace(/\n/g, "\\n");
     }
 
+    //帖子信息卡片
     function generateTopicInfoSection(topic, posts, filterSummary, now, exportTemplate, renderContext) {
         const allTags = [...new Set([...(topic.tags || []), "linuxdo"])];
         const lines = [
@@ -4635,6 +4787,8 @@ category: "${escapeYaml(topic.category || "")}"
 tags:
 ${tagsYaml}
 export_time: "${now.toISOString()}"
+create_date: "${escapeYaml(topic.createDate || "")}"
+edit_date: "${escapeYaml(topic.editDate || "")}"
 floors: ${posts.length}
 ---
 `.trimEnd() + "\n\n";

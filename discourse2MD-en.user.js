@@ -3448,6 +3448,139 @@
     }
 
     // -----------------------
+    // Date formatting & first post date extraction
+    // -----------------------
+    /**
+     * Format date (Date object, timestamp, or string) as "YYYY-MM-DD HH:mm:ss" in local time
+     * @param {Date|number|string} dateInput - Date object, timestamp, or ISO date string
+     * @returns {string} Formatted date string, or empty string if invalid
+     */
+    function formatLocalDateTime(dateInput) {
+        if (!dateInput) return "";
+        const date = dateInput instanceof Date ? dateInput : new Date(dateInput);
+        if (isNaN(date.getTime())) return "";
+        const pad = (n) => String(n).padStart(2, "0");
+        const year = date.getFullYear();
+        const month = pad(date.getMonth() + 1);
+        const day = pad(date.getDate());
+        const hours = pad(date.getHours());
+        const minutes = pad(date.getMinutes());
+        const seconds = pad(date.getSeconds());
+        return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+    }
+
+    /**
+     * Parse date string from title or text (supports Chinese format and standard date strings)
+     * @param {string} text - text to parse
+     * @returns {Date|null} Date instance or null
+     */
+    function parseDateFromTitleOrString(text) {
+        if (!text || typeof text !== "string") return null;
+        const cnMatch = text.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+        if (cnMatch) {
+            const date = new Date(cnMatch[1], cnMatch[2] - 1, cnMatch[3], cnMatch[4], cnMatch[5], cnMatch[6] || 0);
+            if (!isNaN(date.getTime())) return date;
+        }
+        const parsed = Date.parse(text);
+        if (!isNaN(parsed)) return new Date(parsed);
+        return null;
+    }
+
+    /**
+     * Extract the first post's published date for Markdown frontmatter create_date
+     * Strategy:
+     * 1. Try DOM elements for post #1 (.post-info.post-date .relative-date[data-time])
+     * 2. Fall back to Discourse API response (mainFirstPost?.created_at or mainData?.created_at)
+     * 3. Format as "YYYY-MM-DD HH:mm:ss" in local time
+     * @param {Object} mainFirstPost - API first post object
+     * @param {Object} mainData - API topic details object
+     * @returns {string} Formatted date string
+     */
+    function extractFirstPostPublishDate(mainFirstPost, mainData) {
+        let rawDate = null;
+
+        try {
+            const dateEl =
+                document.querySelector("#post_1 .post-info.post-date .relative-date") ||
+                document.querySelector("#post_1 .post-info.post-date [data-time]") ||
+                document.querySelector("[data-post-number='1'] .post-info.post-date .relative-date") ||
+                document.querySelector(".topic-post:first-child .post-info.post-date .relative-date") ||
+                document.querySelector(".post-info.post-date .relative-date") ||
+                document.querySelector(".post-info.post-date [data-time]");
+
+            if (dateEl) {
+                const dataTimeAttr = dateEl.getAttribute("data-time");
+                if (dataTimeAttr && !isNaN(Number(dataTimeAttr))) {
+                    rawDate = Number(dataTimeAttr);
+                } else {
+                    const titleAttr = dateEl.getAttribute("title");
+                    const parsedTitle = parseDateFromTitleOrString(titleAttr);
+                    if (parsedTitle) rawDate = parsedTitle;
+                }
+            }
+        } catch (e) {
+            // ignore DOM errors
+        }
+
+        if (!rawDate) {
+            rawDate = mainFirstPost?.created_at || mainData?.created_at || null;
+        }
+
+        return formatLocalDateTime(rawDate);
+    }
+
+    /**
+     * Extract the first post's last edited date for Markdown frontmatter edit_date
+     * Strategy:
+     * 1. Try DOM element for post #1 edit history (.post-info.edits button[title])
+     * 2. If DOM unmounted, check API mainFirstPost (version > 1 or last_version_at / updated_at)
+     * 3. Return "" if the post has never been edited
+     * 4. Format as "YYYY-MM-DD HH:mm:ss" in local time
+     * @param {Object} mainFirstPost - API first post object
+     * @param {Object} mainData - API topic details object
+     * @returns {string} Formatted date string or "" if unedited
+     */
+    function extractFirstPostEditDate(mainFirstPost, mainData) {
+        let rawDate = null;
+
+        try {
+            const editsEl =
+                document.querySelector("#post_1 .post-info.edits") ||
+                document.querySelector("[data-post-number='1'] .post-info.edits") ||
+                document.querySelector(".topic-post:first-child .post-info.edits") ||
+                document.querySelector(".post-info.edits");
+
+            if (editsEl) {
+                const timeEl = editsEl.querySelector("[data-time]");
+                if (timeEl) {
+                    const dataTimeAttr = timeEl.getAttribute("data-time");
+                    if (dataTimeAttr && !isNaN(Number(dataTimeAttr))) {
+                        rawDate = Number(dataTimeAttr);
+                    }
+                }
+                if (!rawDate) {
+                    const btn = editsEl.querySelector("button") || editsEl;
+                    const titleAttr = btn.getAttribute("title") || editsEl.getAttribute("title");
+                    const parsedTitle = parseDateFromTitleOrString(titleAttr);
+                    if (parsedTitle) rawDate = parsedTitle;
+                }
+            }
+        } catch (e) {
+            // ignore DOM errors
+        }
+
+        if (!rawDate && mainFirstPost) {
+            const isEdited = (mainFirstPost.version && mainFirstPost.version > 1) ||
+                (mainFirstPost.last_version_at && mainFirstPost.last_version_at !== mainFirstPost.created_at);
+            if (isEdited) {
+                rawDate = mainFirstPost.last_version_at || mainFirstPost.updated_at || null;
+            }
+        }
+
+        return formatLocalDateTime(rawDate);
+    }
+
+    // -----------------------
     // Fetch all posts
     // -----------------------
     async function fetchAllPostsDetailed(topicId) {
@@ -3473,6 +3606,10 @@
             .map((t) => t.textContent.trim())
             .filter(Boolean);
 
+        // Extract first post publish & edit dates
+        const createDate = extractFirstPostPublishDate(mainFirstPost, mainData);
+        const editDate = extractFirstPostEditDate(mainFirstPost, mainData);
+
         const topic = {
             topicId: String(topicId || ""),
             // 提取帖子标题并清除首尾可能存在的空白字符，保证标题纯净
@@ -3486,6 +3623,10 @@
                     : domTags) || [],
             url: window.location.href,
             opUsername: opUsername || "",
+            // First post publish date (create_date)
+            createDate: createDate || "",
+            // First post last edit date (edit_date, empty if unedited)
+            editDate: editDate || "",
         };
 
         let allPosts = [];
@@ -4634,6 +4775,8 @@ category: "${escapeYaml(topic.category || "")}"
 tags:
 ${tagsYaml}
 export_time: "${now.toISOString()}"
+create_date: "${escapeYaml(topic.createDate || "")}"
+edit_date: "${escapeYaml(topic.editDate || "")}"
 floors: ${posts.length}
 ---
 `.trimEnd() + "\n\n";
