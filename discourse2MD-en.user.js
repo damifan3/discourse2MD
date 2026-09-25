@@ -1072,6 +1072,46 @@
                 return tableMd ? `\n${tableMd}\n\n` : "";
             }
 
+            // 处理 HTML5 折叠块 <details>
+            if (tag === "details") {
+                // 1. 查找直接子级中的 <summary> 元素（使用 childNodes 避免嵌套 details 时误选深层 summary）
+                const summaryEl = Array.from(el.childNodes).find(
+                    (c) => c.nodeType === Node.ELEMENT_NODE && c.tagName && c.tagName.toLowerCase() === "summary"
+                );
+
+                // 2. 提取并序列化 summary 的标题文本，若无标题或为空则使用默认占位文本
+                const summaryText = summaryEl
+                    ? Array.from(summaryEl.childNodes).map((c) => serialize(c, inPre)).join("").trim()
+                    : "";
+                // 去除标题内多余的换行符，确保 Callout 语法行格式规范
+                const cleanTitle = (summaryText || "Details").replace(/\r?\n+/g, " ").trim();
+
+                // 3. 过滤掉 summary 元素，将其余所有子节点递归序列化为折叠体正文
+                const contentNodes = Array.from(el.childNodes).filter((c) => c !== summaryEl);
+                const content = contentNodes
+                    .map((c) => serialize(c, inPre))
+                    .join("")
+                    .trim();
+
+                // 4. 判断原 HTML 是否带有 open 属性以保留展开状态（'+' 表示默认展开，'-' 表示默认折叠）
+                const foldSign = el.hasAttribute("open") ? "+" : "-";
+
+                // 5. 采用 Obsidian 原生折叠 Callout 语法（> [!note]- 或 > [!note]+）
+                // 解决 Obsidian 编辑模式（Live Preview）下 HTML <details> 不解析 Markdown、内容坍缩成一坨的缺陷
+                // Callout 内部每一行（包含空行）均补齐 '>' 引用符，保证折叠块连续完整，且标题、列表、代码块均能实时渲染
+                const contentLines = content ? content.split("\n") : [];
+                const calloutBody = contentLines.length > 0
+                    ? contentLines.map((line) => line ? `> ${line}` : ">").join("\n")
+                    : "> ";
+
+                return `\n\n> [!note]${foldSign} ${cleanTitle}\n${calloutBody}\n\n`;
+            }
+
+            // 处理 <summary> 标签：作为 details 的直接子元素时已在外层被提取；若是离散的 summary 则清空避免污染正文
+            if (tag === "summary") {
+                return "";
+            }
+
             const nextInPre = inPre || tag === "pre";
             return Array.from(el.childNodes).map((c) => serialize(c, nextInPre)).join("");
         }
